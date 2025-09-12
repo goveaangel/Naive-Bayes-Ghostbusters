@@ -1,0 +1,261 @@
+---
+title: "WebScraping YourGhostStories"
+author: "Diego Vértiz Padilla, José Ángel Govea García, Augusto Ley Rodríguez, Daniel Alberto Sánchez Fortiz"
+format:
+   html:
+     toc: true
+     html-math-method: katex
+     embed-resources: true
+     self-contained-math: true
+     df-print: kable
+editor: source
+---
+
+
+```{r}
+#install.packages("robotstxt")
+#install.packages("rvest")
+```
+
+Implementamos paths_allowed() para saber si tenemos acceso a webscraping de la página
+
+```{r}
+library(robotstxt)
+
+paths_allowed("https://www.yourghoststories.com/")
+```
+Confirmamos con TRUE que es posible el webscraping
+
+Funciones de rvest (Proporcionadas por la Dra. Cetinkaya)
+Core:
+read_html - Read HTML data from a url or character string
+html_node - Select a specified node from HTML document
+html_nodes - Select specified nodes from HTML document
+html_table - Parse an HTML table into a data frame
+html_text - Extract tag pairs' content
+html_name - Extract tags' names
+html_attrs - Extract all of each tag's attributes
+html_attr - Extract tags' attribute value by name
+
+
+
+```{r}
+library(rvest)
+library(purrr)
+library(dplyr)
+library(stringr)
+
+page <- read_html("https://www.yourghoststories.com/real-ghost-story.php?story=28550")
+
+# typeof(page1)
+# class(page1)
+
+```
+Dado que los títulos de las historias se llaman "a", busqué en el sourc code cómo se llamaban realmente todos los títulos porque a realmente se refiere a links en general. En el source code se llaman
+a[href*='real-ghost-story.php'] y un slash al identificador de la historia. Esos serán los títulos.
+
+
+```{r}
+library(lubridate)
+library(parallel)
+
+historia_details <- function(page){
+  titulo <- page %>%
+    html_nodes(".storytitle") %>%
+    html_text()
+  
+  pais <- page %>%
+    html_nodes("#body-content-publication a:nth-child(7)") %>%
+    html_text()
+  
+  linea_fecha <- page %>%
+    html_nodes("div.storyinfo") %>%
+    html_text()      
+  
+  linea_fecha <- linea_fecha[grepl("Date:", linea_fecha)]
+  fecha_str <- sub(".*Date:\\s*", "", linea_fecha)
+  fecha <- parse_date_time(fecha_str, orders = c("ymd", "dmy", "mdy"))
+  
+  categoria <- page %>%
+    html_node("div.storyinfo a[href*='ghost-stories-categories.php?category=']") %>%
+    html_text()
+  
+  texto <- page %>%
+    html_nodes("#story p") %>%
+    html_text()
+  
+  texto_unido <- paste(texto, collapse = " ")
+  
+  return(list(
+    titulo = titulo,
+    pais = pais,
+    fecha = fecha,
+    categoria = categoria,
+    texto = texto_unido
+  ))
+}
+```
+
+
+Me extrajo pocas, entonces implementaré una función para extraer de varias páginas de esta categoría:
+
+```{r}
+get_story_links <- function(category_id, page_num){
+  url_cat <- paste0(
+    "https://www.yourghoststories.com/ghost-stories-categories.php?category=",
+    category_id, "&page=", page_num
+  )
+  pg <- tryCatch(read_html(url_cat), error = function(e) NULL)
+  if (is.null(pg)) return(character(0))
+
+  links <- pg %>%
+    html_nodes("a[href*='real-ghost-story.php?story=']") %>%
+    html_attr("href")
+
+  if (length(links) == 0) return(character(0))
+  links <- unique(links)
+  links <- links[grepl("real-ghost-story\\.php\\?story=[0-9]+$", links)]
+  links <- gsub("^/", "", links)
+  paste0("https://www.yourghoststories.com/", links)
+}
+
+# ==== Lector de UNA historia con retry + timeout, puede omitir texto ====
+fetch_one_story <- function(lnk, include_text = TRUE, timeout_sec = 15){
+  # intento 1
+  pg_story <- tryCatch(read_html(lnk, timeout = timeout_sec), error = function(e) NULL)
+  if (is.null(pg_story)) {
+    # intento 2
+    pg_story <- tryCatch(read_html(lnk, timeout = timeout_sec), error = function(e) NULL)
+    if (is.null(pg_story)) return(NULL)
+  }
+
+  det <- historia_details(pg_story)
+  if (!include_text) det$texto <- NA_character_
+
+  data.frame(
+    url = lnk,
+    titulo = ifelse(length(det$titulo)>0, det$titulo, NA),
+    pais = ifelse(length(det$pais)>0, det$pais, NA),
+    fecha = if (length(det$fecha) > 0) as.Date(det$fecha) else NA_Date_,
+    categoria_reportada = ifelse(length(det$categoria)>0, det$categoria, NA),
+    texto = ifelse(length(det$texto)>0, det$texto, NA),
+    stringsAsFactors = FALSE
+  )
+}
+
+pmap_stories <- function(links, include_text = TRUE, timeout_sec = 15, cores = max(1, detectCores()-1)){
+  if (.Platform$OS.type == "unix") {
+    mclapply(links, fetch_one_story, include_text = include_text, timeout_sec = timeout_sec, mc.cores = cores)
+  } else {
+    lapply(links, fetch_one_story, include_text = include_text, timeout_sec = timeout_sec)
+  }
+}
+
+# ==== Scraper por categoría (páginas en serie; historias en paralelo) ====
+# parallel (base R): https://stat.ethz.ch/R-manual/R-devel/library/parallel/doc/parallel.pdf 
+# Basado en esta implementación y explicación sobre los Cores de las máquinas.
+scrap_categoria_simple <- function(category_id, max_pages = 8, include_text = TRUE, cores = max(1, detectCores()-1)){
+  res_list <- list()
+  k <- 0
+  empty_streak <- 0
+
+  for (p in 1:max_pages){
+    story_links <- get_story_links(category_id, p)
+    if (length(story_links) == 0){
+      empty_streak <- empty_streak + 1
+      if (empty_streak >= 2) {
+        message("category=", category_id, " sin historias en page=", p, " -> fin.")
+        break
+      }
+      next
+    } else {
+      empty_streak <- 0
+    }
+
+    rows <- pmap_stories(story_links, include_text = include_text, timeout_sec = 15, cores = cores)
+    rows <- rows[!vapply(rows, is.null, logical(1))]
+    if (length(rows) > 0) {
+      chunk <- do.call(rbind, rows)
+      chunk$categoria_id <- category_id
+      k <- k + 1
+      res_list[[k]] <- chunk
+    }
+
+    Sys.sleep(0.7)  # pausa suave entre páginas para no saturar
+  }
+
+  if (length(res_list) == 0) return(data.frame())
+  out <- do.call(rbind, res_list)
+  out[!duplicated(out$url), ]
+}
+
+categorias <- c(1, 5)  # Haunted Places, Haunted Items
+todo <- data.frame()
+
+for (cid in categorias){
+  cat_df <- scrap_categoria_simple(category_id = cid, max_pages = 8, include_text = TRUE, cores = 4)
+  if (nrow(cat_df) > 0) {
+    todo <- rbind(todo, cat_df)
+  }
+}
+
+# dedupe por URL
+if (nrow(todo) > 0) {
+  todo <- todo[!duplicated(todo$url), ]
+}
+
+cat("Historias totales:", nrow(todo), "\n")
+head(todo[, c("titulo","pais","fecha","categoria_reportada","categoria_id","url")])
+
+
+write.csv(todo, file = "resultados_webscraping.csv")
+```
+
+
+Explicación código:
+
+1) get_story_links(category_id, page_num)
+	•	Arma la URL de una página de categoría:
+ghost-stories-categories.php?category=ID&page=P.
+	•	Lee el HTML (read_html).
+	•	Extrae todos los <a> cuyo href (el hipervínculo) contiene real-ghost-story.php?story=.
+	•	Filtra solo los que terminan en story=NUM (evita basura). (Todos los links a historias tienen este formato)
+	•	Quita duplicados y convierte a URL absolutas (https://www.yourghoststories.com/...).
+	•	Devuelve un vector de URLs de historias. 
+
+2) fetch_one_story(lnk, include_text = TRUE, timeout_sec = 15)
+	•	Descarga una historia individual con read_html(lnk, timeout = 15).
+	•	Si falla, reintenta 1 vez (retry simple).
+	•	Llama a tu historia_details(pg_story) para sacar:
+	•	titulo, pais, fecha (como Date), categoria, texto.
+	•	Si include_text = FALSE, guarda NA en texto para ir más rápido.
+	•	Empaqueta todo en un data.frame de una fila y lo devuelve.
+
+Nota: Usamos (length(det$fecha)>0) as.Date(det$fecha) else NA_Date_ para no romper la clase Date.
+
+3) pmap_stories(links, ...)
+	•	Usa parallel::mclapply para procesar varias historias en paralelo. (base R Parallel)
+	•	En Windows, hace fallback a lapply (secuencial).
+	•	Retorna una lista de data.frames (uno por historia).
+
+4) scrap_categoria_simple(category_id, max_pages = 8, ...)
+	•	Recorre páginas 1..max_pages de una categoría.
+	•	Para cada página:
+	1.	Consigue links con get_story_links.
+	2.	Si no hay links, incrementa empty_streak y tras dos páginas seguidas vacías, rompe el bucle (fin de la categoría).
+	3.	Si sí hay links, llama a pmap_stories(...) para bajar y parsear todas las historias en paralelo (o secuencial según SO).
+	4.	Filtra los NULL (errores) y une las filas de esa página con do.call(rbind, ...).
+	5.	Añade categoria_id y acumula.
+	6.	Sys.sleep(0.7) para no saturar el servidor.
+	•	Al final, une todo, y hace dedupe () por URL.
+
+5) Driver final
+	•	Define categorias <- c(1, 5) (Haunted Places, Haunted Items).
+	•	Para cada cid, llama scrap_categoria_simple( max_pages = 8 (Para que den más de 500 historias por categoría), cores = 4).
+	•	Concatena todo a todo y elimina duplicados por URL.
+	•	Imprime cuántas filas hay y un head(...).
+	•	Guarda a CSV: write.csv(todo, "resultados_webscraping.csv", row.names = FALSE).
+
+
+
+
