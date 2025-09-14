@@ -108,8 +108,9 @@ get_story_links <- function(category_id, page_num){
   pg <- tryCatch(read_html(url_cat), error = function(e) NULL)
   if (is.null(pg)) return(character(0))
 
+  # SOLO la lista central (ajusta si tu DOM difiere)
   links <- pg %>%
-    html_nodes("a[href*='real-ghost-story.php?story=']") %>%
+    html_nodes("div#body-content-publication strong > a[href*='real-ghost-story.php?story=']") %>%
     html_attr("href")
 
   if (length(links) == 0) return(character(0))
@@ -189,7 +190,7 @@ scrap_categoria_simple <- function(category_id, max_pages = 8, include_text = TR
   out[!duplicated(out$url), ]
 }
 
-categorias <- c(1, 5)  # Haunted Places, Haunted Items
+categorias <- c(1, 5)  # Haunted Places, Old Hags/Sleep Paralysis
 todo <- data.frame()
 
 for (cid in categorias){
@@ -204,14 +205,13 @@ if (nrow(todo) > 0) {
   todo <- todo[!duplicated(todo$url), ]
 }
 
+todo <- todo %>% filter(categoria_id %in% c(1,5))
 cat("Historias totales:", nrow(todo), "\n")
 head(todo[, c("titulo","pais","fecha","categoria_reportada","categoria_id","url")])
 
-
+table(todo$categoria_id, todo$categoria_reportada)
 write.csv(todo, file = "resultados_webscraping.csv")
 ```
-
-
 Explicación código:
 
 1) get_story_links(category_id, page_num)
