@@ -1,4 +1,18 @@
+<<<<<<< HEAD
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
+=======
+# macOS
+.DS_Store
+
+# R / RStudio
+.Rhistory
+.Rproj.user/
+*.Rproj
+*.docx
+
+# Datos y salidas (ajusta según necesites)
+Quarto/*.csv
+>>>>>>> 5aa8f90 (Agregar Procesamiento y corpus.rds)
