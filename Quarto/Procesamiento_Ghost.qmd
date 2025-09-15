@@ -1,0 +1,70 @@
+---
+title: "Procesamiento PostWebScraping"
+author: "Diego Vértiz Padilla, José Ángel Govea García, Augusto Ley Rodríguez, Daniel Alberto Sánchez Fortiz"
+format:
+   html:
+     toc: true
+     html-math-method: katex
+     embed-resources: true
+     self-contained-math: true
+     df-print: kable
+editor: source
+---
+```{r}
+library(dplyr)
+library(tidytext)
+library(tm)
+
+# 1) Carga y limpieza básica
+datos <- read.csv("resultados_webscraping.csv", stringsAsFactors = FALSE)
+
+corpus <- datos %>%
+  transmute(
+    doc_id    = make.unique(titulo),                            
+    text      = texto %>% as.character(),       
+    categoria = categoria_reportada             
+  ) %>%
+  filter(!is.na(text), nzchar(text)) %>%        
+  distinct(doc_id, .keep_all = TRUE)            
+
+# 2) Tokenización + stopwords
+data("stop_words")
+
+tokens <- corpus %>%
+  unnest_tokens(word, text) %>%                 
+  filter(!str_detect(word, "^[0-9]+$")) %>%     
+  anti_join(stop_words, by = "word")
+
+# 3) Filtrado léxico (freq > 10) 
+vocab_keep <- tokens %>%
+  count(word, name = "freq_total") %>%
+  filter(freq_total > 10)
+
+tokens_f <- tokens %>%
+  inner_join(vocab_keep, by = "word") %>%
+  select(-freq_total)
+
+topN <- 5000
+vocab_top <- tokens_f %>%
+  distinct(doc_id, word) %>%
+  count(word, name = "df") %>%
+  arrange(desc(df)) %>%
+  slice_head(n = topN) %>%
+  select(word)
+
+tokens_f <- tokens_f %>% semi_join(vocab_top, by = "word")
+
+# 4) DTM (sparse) 
+word_counts <- tokens_f %>%
+  count(doc_id, word, sort = FALSE)
+
+dtm <- word_counts %>%
+  cast_dtm(document = doc_id, term = word, value = n)
+
+message("Docs: ", nDocs(dtm), " | Terms: ", nTerms(dtm))
+stopifnot(nDocs(dtm) > 0, nTerms(dtm) > 0)
+
+# 6) Guardar 
+saveRDS(dtm,    file = "../data/dtm_sparse.rds")
+saveRDS(corpus, file = "../data/corpus.rds")
+```
