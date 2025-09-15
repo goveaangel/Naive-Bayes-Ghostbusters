@@ -1,0 +1,171 @@
+---
+title: "Modelo de Clasificación Naive Bayes 1 (Librería e1071)"
+author: "Diego Vértiz Padilla, José Ángel Govea García, Augusto Ley Rodríguez, Daniel Alberto Sánchez Fortiz"
+format:
+   html:
+     toc: true
+     html-math-method: katex
+     embed-resources: true
+     self-contained-math: true
+     df-print: kable
+editor: source
+---
+
+```{r}
+library(dplyr)
+library(tm)
+library(e1071)
+library(syuzhet)
+library(caret)
+library(tibble)
+library(janitor)
+library(ggplot2)
+library(tidyr)
+```
+
+
+```{r}
+metrics_from_cm <- function(cm){
+  acc <- as.numeric(cm$overall["Accuracy"])
+  byc <- cm$byClass
+  if (is.null(dim(byc))) { # binario
+    precision <- as.numeric(byc["Pos Pred Value"])
+    recall    <- as.numeric(byc["Sensitivity"])
+    f1        <- 2 * (precision*recall) / (precision + recall)
+  } else { # multiclase (macro)
+    ppv   <- byc[, "Pos Pred Value"]
+    sens  <- byc[, "Sensitivity"]
+    f1vec <- 2 * (ppv * sens) / (ppv + sens)
+    precision <- mean(ppv,  na.rm = TRUE)
+    recall    <- mean(sens, na.rm = TRUE)
+    f1        <- mean(f1vec, na.rm = TRUE)
+  }
+  tibble(
+    accuracy  = round(acc, 4),
+    precision = round(precision, 4),
+    recall    = round(recall, 4),
+    f1_score  = round(f1, 4)
+  )
+}
+
+# =======================
+# Cargar insumos
+# =======================
+dtm    <- readRDS("../data/dtm_sparse.rds")   # tm::DocumentTermMatrix
+corpus <- readRDS("../data/corpus.rds")       # tibble: doc_id, text, categoria
+
+# X (denso) + y alineados
+X_full <- as.data.frame(as.matrix(dtm), check.names = TRUE)
+doc_ids <- rownames(X_full)
+y <- factor(corpus$categoria[ match(doc_ids, corpus$doc_id) ])
+keep <- !is.na(y)
+X_full <- X_full[keep, , drop = FALSE]
+y      <- y[keep]
+doc_ids <- doc_ids[keep]
+
+# NRC alineado (10 columnas: anger, fear, anticipation, trust, surprise, sadness, joy, disgust, positive, negative)
+nrc_all     <- get_nrc_sentiment(as.character(corpus$text))
+nrc_use     <- nrc_all[ match(doc_ids, corpus$doc_id), , drop = FALSE]
+
+# =======================
+# Train/Test split 70/30 
+# =======================
+set.seed(1234)
+n <- nrow(X_full)
+idx_tr <- sample.int(n, floor(0.7*n))
+idx_te <- setdiff(seq_len(n), idx_tr)
+
+# =======================
+topN <- 800
+df_vec    <- colSums(X_full > 0) # document frequency
+top_terms <- names(sort(df_vec, decreasing = TRUE))[1:min(topN, ncol(X_full))]
+X_top     <- X_full[, top_terms, drop = FALSE]
+
+# Combos
+X_full_plus_nrc <- cbind(X_full, nrc_use)
+X_top_plus_nrc  <- cbind(X_top,  nrc_use)
+
+# =======================
+# Entrenar y evaluar (e1071)
+# =======================
+
+fit_eval <- function(Xmat, y, tag){
+  m  <- naiveBayes(Xmat[idx_tr, , drop = FALSE], y[idx_tr])
+  p  <- predict(m, Xmat[idx_te, , drop = FALSE])
+  cm <- confusionMatrix(p, y[idx_te])
+  list(
+    metrics = metrics_from_cm(cm) %>% mutate(modelo = tag),
+    cmtbl   = tibble(Real = y[idx_te], Predicho = p) %>% tabyl(Real, Predicho) %>% adorn_totals(c("row","col"))
+  )
+}
+
+res1 <- fit_eval(X_full,          y, "BOW completo (e1071)")
+res2 <- fit_eval(X_top,           y, paste0("BOW Top-", length(top_terms), " (e1071)"))
+res3 <- fit_eval(X_full_plus_nrc, y, "BOW completo + NRC (e1071)")
+res4 <- fit_eval(nrc_use,         y, "NRC solo (e1071)")
+res5 <- fit_eval(X_top_plus_nrc,  y, paste0("BOW Top-", length(top_terms), " + NRC (e1071)"))
+
+# =======================
+# Comparativa de métricas (tabla)
+# =======================
+metrics_df <- bind_rows(res1$metrics, res2$metrics, res3$metrics, res4$metrics, res5$metrics)
+metrics_df %>% arrange(desc(accuracy))
+```
+```{r}
+# =======================
+# Barras de métricas por modelo
+# =======================
+metrics_long <- metrics_df %>%
+  pivot_longer(cols = c(accuracy, precision, recall, f1_score),
+               names_to = "metric", values_to = "value")
+
+ggplot(metrics_long, aes(x = metric, y = value, fill = modelo)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Métricas por modelo (e1071)",
+       x = "Métrica", y = "Valor (proporción)") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 11))
+```
+```{r}
+# =======================
+# Heatmap de la matriz de confusión del MEJOR modelo
+# (según accuracy)
+# =======================
+best_tag <- metrics_df$modelo[ which.max(metrics_df$accuracy) ]
+cmtbls <- setNames(
+  list(res1$cmtbl,              # BOW completo
+       res2$cmtbl,              # BOW Top-N
+       res3$cmtbl,              # BOW completo + NRC
+       res4$cmtbl,              # NRC solo
+       res5$cmtbl),             # BOW Top-N + NRC
+  c(res1$metrics$modelo,
+    res2$metrics$modelo,
+    res3$metrics$modelo,
+    res4$metrics$modelo,
+    res5$metrics$modelo)
+)
+
+best_tbl <- cmtbls[[best_tag]]
+
+cm_long <- best_tbl %>%
+  filter(Real != "Total") %>%
+  pivot_longer(-Real, names_to = "Predicho", values_to = "Casos") %>%
+  filter(Predicho != "Total")
+
+# ordenar ejes por frecuencia
+ord_real <- cm_long %>% group_by(Real) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Real)
+ord_pred <- cm_long %>% group_by(Predicho) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Predicho)
+cm_long$Real     <- factor(cm_long$Real, levels = ord_real)
+cm_long$Predicho <- factor(cm_long$Predicho, levels = ord_pred)
+
+ggplot(cm_long, aes(x = Predicho, y = Real, fill = Casos)) +
+  geom_tile() +
+  geom_text(aes(label = Casos), size = 4) +
+  scale_fill_gradient(low = "#f0f9e8", high = "#0868ac") +
+  labs(title = paste0("Matriz de confusión (", best_tag, ")"),
+       x = "Predicho", y = "Real", fill = "Casos") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
