@@ -1,0 +1,282 @@
+---
+title: "Modelo_Naive_Bayes_3_LaplaceSmoothing_CV"
+author: "Diego Vértiz Padilla, José Ángel Govea García, Augusto Ley Rodríguez, Daniel Alberto Sánchez Fortiz"
+format:
+   html:
+     toc: true
+     html-math-method: katex
+     embed-resources: true
+     self-contained-math: true
+     df-print: kable
+editor: source
+---
+
+```{r}
+# ---- Librerías ----
+if (!requireNamespace("discrim", quietly = TRUE)) install.packages("discrim")
+if (!requireNamespace("klaR", quietly = TRUE)) install.packages("klaR")
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(janitor)
+library(tm)
+library(klaR)
+library(caret)
+library(syuzhet)
+library(ggplot2)
+```
+
+
+```{r}
+# =========================
+# Insumos
+# =========================
+dtm    <- readRDS("../data/dtm_sparse.rds")   
+corpus <- readRDS("../data/corpus.rds")       
+
+# X completo
+X_full <- as.data.frame(as.matrix(dtm), check.names = TRUE)
+doc_ids <- rownames(X_full)
+y <- factor(corpus$categoria[ match(doc_ids, corpus$doc_id) ])
+keep <- !is.na(y)
+X_full <- X_full[keep, , drop = FALSE]
+y      <- y[keep]
+doc_ids <- doc_ids[keep]
+
+# NRC (10 cols) 
+nrc_all <- syuzhet::get_nrc_sentiment(as.character(corpus$text))
+nrc_use <- nrc_all[ match(doc_ids, corpus$doc_id), , drop = FALSE] %>%
+  dplyr::rename_with(~ paste0("nrc_", .x))
+
+# BOW Top-N por DF
+topN <- 800
+df_vec    <- colSums(X_full > 0)
+top_terms <- names(sort(df_vec, decreasing = TRUE))[1:min(topN, ncol(X_full))]
+X_top     <- X_full[, top_terms, drop = FALSE]
+
+# Combos
+X_fullN <- cbind(X_full, nrc_use)
+X_topN  <- cbind(X_top,  nrc_use)
+
+make_df <- function(X, y) { out <- as_tibble(X); out$..y.. <- y; out }
+df_full  <- make_df(X_full, y)
+df_top   <- make_df(X_top,  y)
+df_nrc   <- make_df(nrc_use, y)
+df_fullN <- make_df(X_fullN, y)
+df_topN  <- make_df(X_topN,  y)
+
+# Split 70/30
+set.seed(1234)
+n <- nrow(df_full)
+idx_tr <- sample.int(n, floor(0.7*n))
+idx_te <- setdiff(seq_len(n), idx_tr)
+
+split_like <- function(df) list(
+  train = df[idx_tr, , drop = FALSE],
+  test  = df[idx_te,  , drop = FALSE]
+)
+sp_full  <- split_like(df_full)
+sp_top   <- split_like(df_top)
+sp_nrc   <- split_like(df_nrc)
+sp_fullN <- split_like(df_fullN)
+sp_topN  <- split_like(df_topN)
+```
+
+```{r}
+#--------Función--------------
+metrics_from_cm <- function(cm){
+  acc <- as.numeric(cm$overall["Accuracy"])
+  byc <- cm$byClass
+  if (is.null(dim(byc))) {
+    precision <- as.numeric(byc["Pos Pred Value"])
+    recall    <- as.numeric(byc["Sensitivity"])
+    f1        <- 2*(precision*recall)/(precision+recall)
+  } else {
+    ppv   <- byc[, "Pos Pred Value"]
+    sens  <- byc[, "Sensitivity"]
+    f1vec <- 2*(ppv*sens)/(ppv+sens)
+    precision <- mean(ppv,  na.rm=TRUE)
+    recall    <- mean(sens, na.rm=TRUE)
+    f1        <- mean(f1vec, na.rm=TRUE)
+  }
+  tibble::tibble(
+    accuracy  = round(acc,4),
+    precision = round(precision,4),
+    recall    = round(recall,4),
+    f1_score  = round(f1,4)
+  )
+}
+
+# Conserva columnas con varianza > 0 en TODAS 
+keep_cols_by_class_global <- function(X_tr, y_tr){
+  levs <- levels(y_tr)
+  keep <- rep(TRUE, ncol(X_tr))
+  for (lv in levs){
+    idx <- which(y_tr == lv)
+    if (length(idx) > 1) {
+      vj <- apply(X_tr[idx, , drop=FALSE], 2, var)
+      keep <- keep & (vj > 0)
+    } else {
+      distinct2 <- apply(X_tr, 2, function(z) length(unique(z)) > 1)
+      keep <- keep & distinct2
+    }
+  }
+  colnames(X_tr)[keep]
+}
+# -----------------------------------------------------------------------
+
+
+# ===================== Función principal (e1071 + CV Laplace) =====================
+run_cv_e1071 <- function(sp, label_dataset = "",
+                         laplace_grid = c(0, 0.5, 1, 2, 3), v = 5) {
+  stopifnot(is.list(sp), all(c("train","test") %in% names(sp)))
+  tr <- sp$train; te <- sp$test
+  stopifnot(is.data.frame(tr), is.data.frame(te))
+  stopifnot(ncol(tr) >= 2, ncol(te) >= 2)
+
+  y_tr <- factor(tr[[ncol(tr)]])
+  y_te <- factor(te[[ncol(te)]], levels = levels(y_tr))
+
+  X_tr_raw <- tr[, -ncol(tr), drop = FALSE]
+  X_te_raw <- te[, -ncol(te), drop = FALSE]
+
+  # Forzar numérico en X (por si vienen como integer/character)
+  X_tr_raw[] <- lapply(X_tr_raw, function(col) as.numeric(col))
+  X_te_raw[] <- lapply(X_te_raw, function(col) as.numeric(col))
+
+  # --- Filtro GLOBAL sobre TRAIN ---
+  keep_cols <- keep_cols_by_class_global(X_tr_raw, y_tr)
+  if (length(keep_cols) == 0) stop("Filtro dejó 0 columnas. Revisa tu DTM/vars.")
+  X_tr <- X_tr_raw[, keep_cols, drop = FALSE]
+  X_te <- X_te_raw[, keep_cols, drop = FALSE]
+
+  # --- Folds estratificados en TRAIN ---
+  set.seed(2025)
+  folds <- caret::createFolds(y_tr, k = v, returnTrain = FALSE)
+
+  # --- CV en grid de Laplace ---
+  cv_tab <- lapply(laplace_grid, function(L){
+    accs <- numeric(length(folds))
+    for (i in seq_along(folds)){
+      va_idx <- folds[[i]]
+      tr_idx <- setdiff(seq_len(nrow(X_tr)), va_idx)
+
+      mod <- e1071::naiveBayes(x = X_tr[tr_idx, , drop=FALSE],
+                               y = y_tr[tr_idx], laplace = L)
+      pred_va <- predict(mod, X_tr[va_idx, , drop=FALSE])
+      accs[i] <- mean(pred_va == y_tr[va_idx])
+    }
+    tibble::tibble(laplace = L, cv_accuracy = mean(accs))
+  }) |> dplyr::bind_rows() |> dplyr::arrange(dplyr::desc(cv_accuracy))
+
+  best_laplace <- cv_tab$laplace[1]
+
+  # --- Modelo final en TODO el TRAIN con best_laplace + evaluación en TEST ---
+  final_mod <- e1071::naiveBayes(x = X_tr, y = y_tr, laplace = best_laplace)
+  pred_te   <- predict(final_mod, X_te)
+  cm        <- caret::confusionMatrix(pred_te, y_te)
+
+  list(
+    label     = label_dataset,
+    laplace   = best_laplace,
+    cv_table  = cv_tab,
+    metrics   = metrics_from_cm(cm) |>
+                  dplyr::mutate(dataset = label_dataset,
+                                laplace  = best_laplace, .before = 1),
+    cm        = cm,
+    kept_cols = keep_cols
+  )
+}
+# ======================================================================
+```
+
+```{r}
+res_full  <- run_cv_e1071(sp_full,  "BOW completo")
+res_top   <- run_cv_e1071(sp_top,   paste0("BOW Top-", ncol(sp_top$train)-1))
+res_nrc   <- run_cv_e1071(sp_nrc,   "NRC solo")
+res_fullN <- run_cv_e1071(sp_fullN, "BOW completo + NRC")
+res_topN  <- run_cv_e1071(sp_topN,  paste0("BOW Top-", ncol(sp_top$train)-1, " + NRC"))
+
+tabla <- bind_rows(
+  res_full$metrics,
+  res_top$metrics,
+  res_nrc$metrics,
+  res_fullN$metrics,
+  res_topN$metrics
+)
+tabla
+```
+
+```{r}
+# =========================
+# Gráfico de métricas
+# =========================
+metrics_long <- tabla %>%
+  pivot_longer(cols = c(accuracy, precision, recall, f1_score),
+               names_to = "metric", values_to = "value")
+
+metrics_long
+
+ggplot(metrics_long, aes(x = metric, y = value, fill = dataset)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Métricas en test (NB e1071 con CV de Laplace)",
+       subtitle = "Filtro global de varianza por clase + columnas constantes fijadas en train",
+       x = "Métrica", y = "Valor", fill = "Dataset") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 11))
+```
+
+```{r}
+# =========================
+# Heatmap del mejor
+# =========================
+best_name <- tabla$dataset[ which.max(tabla$accuracy) ]
+
+best_cm <- switch(best_name,
+  "BOW completo"        = res_full$cm,
+  "NRC solo"            = res_nrc$cm,
+  "BOW completo + NRC"  = res_fullN$cm,
+  "BOW Top-800"         = res_top$cm,   # aquí fijo el nombre
+  "BOW Top-800 + NRC"   = res_topN$cm
+)
+
+cm_list <- list(
+  res_full$cm,
+  res_nrc$cm,
+  res_fullN$cm,
+  res_top$cm,
+  res_topN$cm
+)
+
+names(cm_list) <- c(
+  "BOW completo",
+  "NRC solo",
+  "BOW completo + NRC",
+  paste0("BOW Top-", ncol(sp_top$train)-1),
+  paste0("BOW Top-", ncol(sp_topN$train)-1, " + NRC")
+)
+
+best_cm <- cm_list[[best_name]]
+
+cm_tbl <- as.data.frame(best_cm$table) %>%
+  as_tibble() %>%
+  rename(Real = Reference, Predicho = Prediction, Casos = Freq)
+
+ord_real <- cm_tbl %>% group_by(Real) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Real)
+ord_pred <- cm_tbl %>% group_by(Predicho) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Predicho)
+cm_tbl$Real     <- factor(cm_tbl$Real, levels = ord_real)
+cm_tbl$Predicho <- factor(cm_tbl$Predicho, levels = ord_pred)
+
+ggplot(cm_tbl, aes(x = Predicho, y = Real, fill = Casos)) +
+  geom_tile() +
+  geom_text(aes(label = Casos), size = 4) +
+  scale_fill_gradient(low = "#f0f9e8", high = "#0868ac") +
+  labs(title = paste0("Matriz de confusión (mejor dataset: ", best_name, ")"),
+       x = "Predicho", y = "Real", fill = "Casos") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
