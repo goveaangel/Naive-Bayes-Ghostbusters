@@ -1,0 +1,956 @@
+---
+title: "Artículo 3: GhostBusters"
+author: "Diego Vértiz Padilla, José Ángel Govea García, Augusto Ley Rodríguez, Daniel Alberto Sánchez Fortiz"
+format:
+  html:
+    toc: true
+    html-math-method: katex
+    embed-resources: true
+    self-contained-math: true
+    df-print: kable
+editor: source
+execute:
+  echo: false
+---
+# Link al Repo de Github
+
+https://github.com/goveaangel/Naive-Bayes-Ghostbusters.git
+
+# Abstract
+
+En este trabajo se desarrolla un clasificador Naive Bayes aplicado a relatos paranormales recopilados del portal Your Ghost Stories. El objetivo fue explorar cómo diferentes representaciones textuales —bolsa de palabras completa (BOW), reducción de vocabulario por frecuencia, variables emocionales NRC y combinaciones— afectan el desempeño del modelo. La metodología incluyó web scraping, limpieza y tokenización de textos, construcción de matrices documento–término, incorporación de variables de sentimiento y validación cruzada con suavizado de Laplace. Los resultados muestran que el modelo basado en un vocabulario reducido de 800 términos combinado con las emociones NRC alcanzó la mejor precisión global (accuracy ≈ 0.77) y un balance superior entre precisión y recall. En contraste, el modelo de BOW completo obtuvo alta precisión pero baja recall, mientras que NRC por sí solo no resultó suficiente. Se concluye que la reducción de dimensionalidad y la incorporación de rasgos semánticos complementarios son estrategias efectivas para mejorar la clasificación de relatos narrativos complejos.
+
+# Introducción
+
+Las historias de terror siempre han provocado intensas emociones en los seres humanos. Pueden despertar miedo, curiosidad o morbo, pero también generan un sentimiento de unión cuando nos comparamos con otras personas que aseguran haber vivido experiencias similares. En muchos casos, estas narraciones se desarrollan de manera simultánea en dos planos: el terrenal y un plano espiritual desconocido para nosotros, habitado por seres a los que comúnmente llamamos fantasmas. La posibilidad de que nuestra realidad no esté limitada a un solo plano es lo que alimenta ese abanico de emociones.
+
+En este contexto surge YourGhostStories.com, un sitio web dedicado a recopilar experiencias que los usuarios describen como encuentros reales con fantasmas. Estas historias no se limitan a una sola forma de manifestación: los fantasmas pueden aparecer repentinamente, mover objetos, provocar ataques durante el sueño o incluso adueñarse por completo de un lugar. Surge entonces la pregunta: ¿es posible identificar la categoría de una historia únicamente a partir de la manera en que los usuarios la narran? ¿Existen patrones lingüísticos que diferencien entre un relato de “Haunted Places” y uno de “Sleep Paralysis”?
+
+El análisis automático de textos narrativos representa un reto importante para la minería de datos debido a la alta variabilidad lingüística, la presencia de ruido y la ambigüedad semántica. Sin embargo, los relatos paranormales constituyen un corpus especialmente interesante: combinan la subjetividad de las experiencias personales con la clasificación temática que hacen los propios usuarios. Una correcta categorización de estos relatos puede aportar información valiosa para comprender las percepciones culturales sobre lo paranormal, además de ofrecer una aplicación práctica en el desarrollo de herramientas de análisis de sentimientos en contextos narrativos. (Manning, Raghavan, Schütze, 2008)
+
+En este artículo se propone un pipeline completo de minería de texto que incluye: (1) recolección de datos mediante web scraping, (2) procesamiento y reducción léxica, (3) construcción de clasificadores Naive Bayes con distintas representaciones de características y (4) comparación sistemática de modelos. El objetivo principal es identificar qué combinación de características logra un mejor equilibrio entre precisión y sensibilidad en la clasificación automática de relatos paranormales.
+
+# Metodología
+
+## WebScraping
+
+Se verificó con la función paths_allowed() que el portal fuera accesible para realizar web scraping. Posteriormente, se implementaron funciones del paquete rvest, siguiendo la metodología explicada por la Dra. Çetinkaya, con el fin de extraer información estructurada de cada relato.
+
+Algunas de las funciones utilizadas fueron:
+	•	read_html: leer datos HTML desde una URL o cadena de texto.
+	•	html_node: seleccionar un nodo específico dentro del documento HTML.
+	•	html_nodes: seleccionar múltiples nodos dentro del documento HTML.
+	•	html_table: convertir una tabla HTML en un data frame.
+	•	html_text: extraer el contenido de las etiquetas.
+	•	html_name: obtener el nombre de las etiquetas.
+	•	html_attrs: extraer todos los atributos de cada etiqueta.
+	•	html_attr: extraer el valor de un atributo específico de una etiqueta.
+	
+(Çetinkaya-Rundel, 2024)
+
+Con estas herramientas se recuperaron fechas, países, categorías y los textos completos de cada historia. En total, se recolectaron más de 25 páginas con más de 50 historias correspondientes a las categorías Haunted Places y Old Hags / Sleep Paralysis, consolidando un dataset de más de mil relatos.
+
+Resultando en una base de datos relevante y fácil de manipular:
+
+```{r}
+#| output: false
+# install.packages(c(
+#   "robotstxt", "rvest", "purrr", "dplyr", "stringr", "lubridate",
+#   "parallel", "tidytext", "tm", "naivebayes", "syuzhet",
+#   "caret", "tibble", "janitor", "ggplot2", "tidyr",
+#   "e1071", "discrim", "klaR"
+# ))
+
+library(robotstxt)
+library(rvest)
+library(purrr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(parallel)
+library(tidytext)
+library(tm)
+library(naivebayes)
+library(syuzhet)
+library(caret)
+library(tibble)
+library(janitor)
+library(ggplot2)
+library(tidyr)
+library(e1071)
+library(discrim)
+library(klaR)
+```
+
+```{r}
+#| output: false
+paths_allowed("https://www.yourghoststories.com/")
+```
+
+```{r}
+#| output: false
+page <- read_html("https://www.yourghoststories.com/real-ghost-story.php?story=28550")
+
+# typeof(page1)
+# class(page1)
+
+```
+
+```{r}
+#| output: false
+historia_details <- function(page){
+  titulo <- page %>%
+    html_nodes(".storytitle") %>%
+    html_text()
+  
+  pais <- page %>%
+    html_nodes("#body-content-publication a:nth-child(7)") %>%
+    html_text()
+  
+  linea_fecha <- page %>%
+    html_nodes("div.storyinfo") %>%
+    html_text()      
+  
+  linea_fecha <- linea_fecha[grepl("Date:", linea_fecha)]
+  fecha_str <- sub(".*Date:\\s*", "", linea_fecha)
+  fecha <- parse_date_time(fecha_str, orders = c("ymd", "dmy", "mdy"))
+  
+  categoria <- page %>%
+    html_node("div.storyinfo a[href*='ghost-stories-categories.php?category=']") %>%
+    html_text()
+  
+  texto <- page %>%
+    html_nodes("#story p") %>%
+    html_text()
+  
+  texto_unido <- paste(texto, collapse = " ")
+  
+  return(list(
+    titulo = titulo,
+    pais = pais,
+    fecha = fecha,
+    categoria = categoria,
+    texto = texto_unido
+  ))
+}
+```
+
+```{r}
+get_story_links <- function(category_id, page_num){
+  url_cat <- paste0(
+    "https://www.yourghoststories.com/ghost-stories-categories.php?category=",
+    category_id, "&page=", page_num
+  )
+  pg <- tryCatch(read_html(url_cat), error = function(e) NULL)
+  if (is.null(pg)) return(character(0))
+
+  # SOLO la lista central (ajusta si tu DOM difiere)
+  links <- pg %>%
+    html_nodes("div#body-content-publication strong > a[href*='real-ghost-story.php?story=']") %>%
+    html_attr("href")
+
+  if (length(links) == 0) return(character(0))
+  links <- unique(links)
+  links <- links[grepl("real-ghost-story\\.php\\?story=[0-9]+$", links)]
+  links <- gsub("^/", "", links)
+  paste0("https://www.yourghoststories.com/", links)
+}
+
+# ==== Lector de UNA historia con retry + timeout, puede omitir texto ====
+fetch_one_story <- function(lnk, include_text = TRUE, timeout_sec = 15){
+  # intento 1
+  pg_story <- tryCatch(read_html(lnk, timeout = timeout_sec), error = function(e) NULL)
+  if (is.null(pg_story)) {
+    # intento 2
+    pg_story <- tryCatch(read_html(lnk, timeout = timeout_sec), error = function(e) NULL)
+    if (is.null(pg_story)) return(NULL)
+  }
+
+  det <- historia_details(pg_story)
+  if (!include_text) det$texto <- NA_character_
+
+  data.frame(
+    url = lnk,
+    titulo = ifelse(length(det$titulo)>0, det$titulo, NA),
+    pais = ifelse(length(det$pais)>0, det$pais, NA),
+    fecha = if (length(det$fecha) > 0) as.Date(det$fecha) else NA_Date_,
+    categoria_reportada = ifelse(length(det$categoria)>0, det$categoria, NA),
+    texto = ifelse(length(det$texto)>0, det$texto, NA),
+    stringsAsFactors = FALSE
+  )
+}
+
+pmap_stories <- function(links, include_text = TRUE, timeout_sec = 15, cores = max(1, detectCores()-1)){
+  if (.Platform$OS.type == "unix") {
+    mclapply(links, fetch_one_story, include_text = include_text, timeout_sec = timeout_sec, mc.cores = cores)
+  } else {
+    lapply(links, fetch_one_story, include_text = include_text, timeout_sec = timeout_sec)
+  }
+}
+
+# ==== Scraper por categoría (páginas en serie; historias en paralelo) ====
+# parallel (base R): https://stat.ethz.ch/R-manual/R-devel/library/parallel/doc/parallel.pdf 
+# Basado en esta implementación y explicación sobre los Cores de las máquinas.
+scrap_categoria_simple <- function(category_id, max_pages = 8, include_text = TRUE, cores = max(1, detectCores()-1)){
+  res_list <- list()
+  k <- 0
+  empty_streak <- 0
+
+  for (p in 1:max_pages){
+    story_links <- get_story_links(category_id, p)
+    if (length(story_links) == 0){
+      empty_streak <- empty_streak + 1
+      if (empty_streak >= 2) {
+        message("category=", category_id, " sin historias en page=", p, " -> fin.")
+        break
+      }
+      next
+    } else {
+      empty_streak <- 0
+    }
+
+    rows <- pmap_stories(story_links, include_text = include_text, timeout_sec = 15, cores = cores)
+    rows <- rows[!vapply(rows, is.null, logical(1))]
+    if (length(rows) > 0) {
+      chunk <- do.call(rbind, rows)
+      chunk$categoria_id <- category_id
+      k <- k + 1
+      res_list[[k]] <- chunk
+    }
+
+    Sys.sleep(0.7)  # pausa suave entre páginas para no saturar
+  }
+
+  if (length(res_list) == 0) return(data.frame())
+  out <- do.call(rbind, res_list)
+  out[!duplicated(out$url), ]
+}
+
+categorias <- c(1, 5)  # Haunted Places, Old Hags/Sleep Paralysis
+todo <- data.frame()
+
+for (cid in categorias){
+  cat_df <- scrap_categoria_simple(category_id = cid, max_pages = 8, include_text = TRUE, cores = 4)
+  if (nrow(cat_df) > 0) {
+    todo <- rbind(todo, cat_df)
+  }
+}
+
+# dedupe por URL
+if (nrow(todo) > 0) {
+  todo <- todo[!duplicated(todo$url), ]
+}
+
+todo <- todo %>% filter(categoria_id %in% c(1,5))
+cat("Historias totales:", nrow(todo), "\n")
+head(todo[, c("titulo","pais","fecha","categoria_reportada","categoria_id","url")])
+
+table(todo$categoria_id, todo$categoria_reportada)
+```
+
+## Procesamiento de los datos
+
+Los relatos fueron organizados en un corpus con identificador único. Se aplicó tokenización y se eliminaron stopwords en inglés, números y duplicados. Para reducir ruido se crearon variaciones con las palabras con frecuencia mayor a 10 y, adicionalmente, se construyó una versión reducida con las 800 palabras más frecuentes por frecuencia documental (DF). Se generaron matrices documento–término dispersas y se calcularon variables emocionales NRC (ira, miedo, tristeza, sorpresa, confianza, etc.) como rasgos adicionales. 
+
+## Clasificador Naive Bayes
+
+El modelo Naive Bayes es un clasificador probabilístico inspirado en el teorema de Bayes, que establece la relación entre la probabilidad a priori y la probabilidad condicional de una clase $C$ dado un conjunto de atributos $X = (x_1, x_2, \dots, x_n)$:
+
+$$
+P(C \mid X) = \frac{P(X \mid C) \, P(C)}{P(X)}
+$$
+
+En el contexto de clasificación, el denominador $P(X)$ es común a todas las clases, por lo que la decisión se basa en maximizar la probabilidad posterior:
+
+$$
+\hat{C} = \arg \max_{C} \; P(C) \prod_{i=1}^n P(x_i \mid C)
+$$
+
+### Independencia condicional y estructura de red
+
+El adjetivo naive (ingenuo) proviene de la suposición de independencia condicional: se asume que cada atributo $x_i$ es independiente de los demás atributos dado el conocimiento de la clase $C$.
+
+En términos de redes bayesianas, esto equivale a un grafo dirigido acíclico donde la clase $C$ es el nodo padre y cada atributo $x_i$ es un nodo hijo condicionado únicamente por C. No se consideran aristas entre atributos, lo cual simplifica enormemente el cálculo de la distribución conjunta:
+
+$$
+P(x_1, x_2, \dots, x_n \mid C) = \prod_{i=1}^n P(x_i \mid C)
+$$
+(Murphy, 2012; Mitchell, 1997; Manning et al., 2008)
+
+### Variedades del modelo
+
+Dependiendo de la naturaleza de los atributos, el modelo puede adoptar distintas distribuciones de probabilidad:
+	•	Multinomial Naive Bayes: adecuado para representaciones de texto en forma de conteos (BOW (Bag of Words), frecuencia de términos). Cada atributo sigue una distribución multinomial condicionada a la clase.
+	•	Bernoulli Naive Bayes: usa variables binarias (presencia/ausencia de una palabra).
+	•	Gaussian Naive Bayes: asume que los atributos numéricos siguen una distribución normal condicionada a la clase. Es aquí donde se habla de una red bayesiana gaussiana ingenua, donde cada nodo hijo tiene como distribución una Gaussiana dependiente del nodo padre (la clase).
+	•	Poisson Naive Bayes: diseñado para variables de conteo, modelando $P(x_i \mid C)$ como una distribución de Poisson.
+
+### Interpretación en clasificación de texto
+
+En nuestro caso, al trabajar con una matriz documento–término, cada término $x_i$ representa la frecuencia (o presencia) de una palabra en un relato. La hipótesis ingenua permite calcular de manera eficiente la probabilidad de un relato dado que pertenece a una categoría paranormal $C$, incluso cuando el número de atributos (palabras) supera los miles.
+
+A pesar de que la suposición de independencia rara vez se cumple estrictamente en lenguaje natural (pues las palabras están correlacionadas), en la práctica Naive Bayes funciona sorprendentemente bien debido a que:
+	1.	El modelo captura regularidades robustas en las distribuciones de palabras por clase.
+	2.	La clasificación solo requiere identificar la clase más probable, no estimar probabilidades exactas.
+	3.	El suavizado de Laplace evita que términos poco frecuentes asignen probabilidad cero, lo que estabiliza la clasificación.
+	
+## Modelos e Implementaciones
+
+Se entrenaron y evaluaron cinco configuraciones principales de características:
+	1.	BOW (Bag of Words/Todas las palabras) completo.
+	2.	BOW reducido (Top-800 términos).
+	3.	Solo NRC.
+	4.	BOW completo + NRC.
+	5.	BOW reducido + NRC.
+
+Se probaron estas 5 variaciones en cada una de las siguientes implementaciones.
+
+### 1.	Librería e1071::naiveBayes (baseline)
+	•	Qué hace: Implementa un Naive Bayes clásico mixto:
+	•	Para variables numéricas asume verosimilitud Gaussiana por clase
+$x_i \mid C=c \sim \mathcal{N}(\mu_{ic}, \sigma_{ic}^2)$.
+	•	Para variables categóricas usa tablas de probabilidad por clase (multinomial/bernoulli implícito).
+	•	Suavizamiento de Laplace (laplace): evita ceros en las tablas categóricas sumando $\alpha$ pseudo-conteos:
+$\hat p = \frac{n + \alpha}{N + \alpha K}$.
+En texto (BOW), esto reduce el “cero fatal” cuando una palabra nunca apareció en la clase durante el entrenamiento.
+	•	Limitaciones relevantes: No modela explícitamente conteos como Poisson; a las columnas numéricas (conteos) las trata como si fueran gaussianas, lo que a veces funciona bien pero no es lo más natural para datos dispersos de conteo.
+	
+### 2.	naivebayes::naive_bayes (con y sin Poisson)
+
+	•	Qué aporta: Misma lógica Bayes ingenuo, pero con implementaciones muy eficientes y opción de modelar conteos con Poisson vía usepoisson = TRUE:
+$x_i \mid C=c \sim \text{Poisson}(\lambda_{ic})$,
+$\quad\mathbb{P}(x_i=k\mid C=c)=e^{-\lambda_{ic}}\frac{\lambda_{ic}^k}{k!}$.
+
+Esto es particularmente razonable para matrices documento-término (conteos por palabra).
+	•	Modos de verosimilitud:
+	•	Sin Poisson: numéricas ~ Gaussian, binarias ~ Bernoulli, categóricas ~ Categorical; con laplace para suavizar.
+	•	Con Poisson: columnas numéricas se modelan como conteos; mantiene laplace para evitar ceros en partes categóricas.
+	•	Ventaja práctica: suele ser más estable/rápido con muchas columnas y permite comparar directamente si Poisson mejora frente al supuesto Gaussiano sobre los conteos.
+	
+### 3. Librería e1071::naiveBayes con búsqueda de Laplace mediante cross-validation (CV)
+
+	•	Motivación: El valor de $\alpha$ (Laplace smoothing) afecta fuertemente la probabilidad posterior, sobre todo cuando el vocabulario es grande y disperso.
+	•	Cómo lo hicimos: K-fold CV sólo en el conjunto de entrenamiento, evaluando una pequeña grilla $\alpha \in \{0, 0.5, 1, 2, 3\}$. Seleccionamos el $\alpha$ que maximiza accuracy (o F1-macro) promedio en validación y reentrenamos con ese valor antes de evaluar en test.
+	•	Detalle importante: Para evitar errores numéricos, filtramos columnas constantes (varianza cero) por clase en el train; así nos aseguramos de que las verosimilitudes estén bien definidas en todos los folds.
+	
+En las 3 implementaciones, con sus 5 diferentes pruebas, se usaron funciones para agilizar el proceso de entrenamiento y predicción.
+
+
+# Aplicación y Resultados
+
+## Resultados con `e1071`
+
+La librería **e1071** se probó con cinco configuraciones: Bag of Words (BOW) completo, BOW Top-800, NRC solo y las combinaciones BOW + NRC.  
+Los mejores resultados se obtuvieron con **BOW Top-800**, alcanzando un *accuracy* de **0.7716**, *precision* de **0.8178**, *recall* de **0.7231** y un *F1-score* de **0.7675**.  
+Este modelo logra un buen equilibrio entre precisión y sensibilidad, superando al BOW completo (que aunque tiene alta precisión, muestra un *recall* muy bajo).  
+
+```{r}
+metrics_from_cm <- function(cm){
+  acc <- as.numeric(cm$overall["Accuracy"])
+  byc <- cm$byClass
+  if (is.null(dim(byc))) { # binario
+    precision <- as.numeric(byc["Pos Pred Value"])
+    recall    <- as.numeric(byc["Sensitivity"])
+    f1        <- 2 * (precision*recall) / (precision + recall)
+  } else { # multiclase (macro)
+    ppv   <- byc[, "Pos Pred Value"]
+    sens  <- byc[, "Sensitivity"]
+    f1vec <- 2 * (ppv * sens) / (ppv + sens)
+    precision <- mean(ppv,  na.rm = TRUE)
+    recall    <- mean(sens, na.rm = TRUE)
+    f1        <- mean(f1vec, na.rm = TRUE)
+  }
+  tibble(
+    accuracy  = round(acc, 4),
+    precision = round(precision, 4),
+    recall    = round(recall, 4),
+    f1_score  = round(f1, 4)
+  )
+}
+
+# =======================
+# Cargar insumos
+# =======================
+dtm    <- readRDS("../data/dtm_sparse.rds")   # tm::DocumentTermMatrix
+corpus <- readRDS("../data/corpus.rds")       # tibble: doc_id, text, categoria
+
+# X (denso) + y alineados
+X_full <- as.data.frame(as.matrix(dtm), check.names = TRUE)
+doc_ids <- rownames(X_full)
+y <- factor(corpus$categoria[ match(doc_ids, corpus$doc_id) ])
+keep <- !is.na(y)
+X_full <- X_full[keep, , drop = FALSE]
+y      <- y[keep]
+doc_ids <- doc_ids[keep]
+
+# NRC alineado (10 columnas: anger, fear, anticipation, trust, surprise, sadness, joy, disgust, positive, negative)
+nrc_all     <- get_nrc_sentiment(as.character(corpus$text))
+nrc_use     <- nrc_all[ match(doc_ids, corpus$doc_id), , drop = FALSE]
+
+# =======================
+# Train/Test split 70/30 
+# =======================
+set.seed(1234)
+n <- nrow(X_full)
+idx_tr <- sample.int(n, floor(0.7*n))
+idx_te <- setdiff(seq_len(n), idx_tr)
+
+# =======================
+topN <- 800
+df_vec    <- colSums(X_full > 0) # document frequency
+top_terms <- names(sort(df_vec, decreasing = TRUE))[1:min(topN, ncol(X_full))]
+X_top     <- X_full[, top_terms, drop = FALSE]
+
+# Combos
+X_full_plus_nrc <- cbind(X_full, nrc_use)
+X_top_plus_nrc  <- cbind(X_top,  nrc_use)
+
+# =======================
+# Entrenar y evaluar (e1071)
+# =======================
+
+fit_eval <- function(Xmat, y, tag){
+  m  <- naiveBayes(Xmat[idx_tr, , drop = FALSE], y[idx_tr])
+  p  <- predict(m, Xmat[idx_te, , drop = FALSE])
+  cm <- confusionMatrix(p, y[idx_te])
+  list(
+    metrics = metrics_from_cm(cm) %>% mutate(modelo = tag),
+    cmtbl   = tibble(Real = y[idx_te], Predicho = p) %>% tabyl(Real, Predicho) %>% adorn_totals(c("row","col"))
+  )
+}
+
+res1 <- fit_eval(X_full,          y, "BOW completo (e1071)")
+res2 <- fit_eval(X_top,           y, paste0("BOW Top-", length(top_terms), " (e1071)"))
+res3 <- fit_eval(X_full_plus_nrc, y, "BOW completo + NRC (e1071)")
+res4 <- fit_eval(nrc_use,         y, "NRC solo (e1071)")
+res5 <- fit_eval(X_top_plus_nrc,  y, paste0("BOW Top-", length(top_terms), " + NRC (e1071)"))
+
+# =======================
+# Comparativa de métricas (tabla)
+# =======================
+metrics_df <- bind_rows(res1$metrics, res2$metrics, res3$metrics, res4$metrics, res5$metrics)
+metrics_df %>% arrange(desc(accuracy))
+```
+```{r}
+# =======================
+# Barras de métricas por modelo
+# =======================
+metrics_long <- metrics_df %>%
+  pivot_longer(cols = c(accuracy, precision, recall, f1_score),
+               names_to = "metric", values_to = "value")
+
+ggplot(metrics_long, aes(x = metric, y = value, fill = modelo)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Métricas por modelo (e1071)",
+       x = "Métrica", y = "Valor (proporción)") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 11))
+```
+```{r}
+# =======================
+# Heatmap de la matriz de confusión del MEJOR modelo
+# (según accuracy)
+# =======================
+best_tag <- metrics_df$modelo[ which.max(metrics_df$accuracy) ]
+cmtbls <- setNames(
+  list(res1$cmtbl,              # BOW completo
+       res2$cmtbl,              # BOW Top-N
+       res3$cmtbl,              # BOW completo + NRC
+       res4$cmtbl,              # NRC solo
+       res5$cmtbl),             # BOW Top-N + NRC
+  c(res1$metrics$modelo,
+    res2$metrics$modelo,
+    res3$metrics$modelo,
+    res4$metrics$modelo,
+    res5$metrics$modelo)
+)
+
+best_tbl <- cmtbls[[best_tag]]
+```
+
+La siguiente figura muestra la matriz de confusión para este caso:
+
+```{r}
+cm_long <- best_tbl %>%
+  filter(Real != "Total") %>%
+  pivot_longer(-Real, names_to = "Predicho", values_to = "Casos") %>%
+  filter(Predicho != "Total")
+
+# ordenar ejes por frecuencia
+ord_real <- cm_long %>% group_by(Real) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Real)
+ord_pred <- cm_long %>% group_by(Predicho) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Predicho)
+cm_long$Real     <- factor(cm_long$Real, levels = ord_real)
+cm_long$Predicho <- factor(cm_long$Predicho, levels = ord_pred)
+
+ggplot(cm_long, aes(x = Predicho, y = Real, fill = Casos)) +
+  geom_tile() +
+  geom_text(aes(label = Casos), size = 4) +
+  scale_fill_gradient(low = "#f0f9e8", high = "#0868ac") +
+  labs(title = paste0("Matriz de confusión (", best_tag, ")"),
+       x = "Predicho", y = "Real", fill = "Casos") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Resultados con naivebayes
+
+La librería naivebayes permitió comparar el desempeño de los modelos con y sin Poisson.
+Se replicaron las mismas cinco configuraciones (BOW completo, BOW Top-800, NRC solo, y sus combinaciones).
+
+Los resultados muestran que la elección de Poisson no alteró significativamente las métricas en este dataset: los valores de accuracy, precision, recall y F1-score fueron prácticamente iguales con y sin Poisson.
+El mejor desempeño se observó nuevamente con BOW Top-800, alcanzando métricas muy similares a las de e1071.
+
+```{r}
+# ===== Helpers =====
+metrics_from_cm <- function(cm){
+  acc <- as.numeric(cm$overall["Accuracy"])
+  byc <- cm$byClass
+  if (is.null(dim(byc))) {
+    precision <- as.numeric(byc["Pos Pred Value"])
+    recall    <- as.numeric(byc["Sensitivity"])
+    f1        <- 2 * (precision*recall) / (precision + recall)
+  } else {
+    ppv   <- byc[,"Pos Pred Value"]
+    sens  <- byc[,"Sensitivity"]
+    f1vec <- 2 * (ppv * sens) / (ppv + sens)
+    precision <- mean(ppv,  na.rm=TRUE)
+    recall    <- mean(sens, na.rm=TRUE)
+    f1        <- mean(f1vec, na.rm=TRUE)
+  }
+  tibble(
+    accuracy  = round(acc, 4),
+    precision = round(precision, 4),
+    recall    = round(recall, 4),
+    f1_score  = round(f1, 4)
+  )
+}
+
+fit_eval_nb <- function(Xmat, y, idx_tr, idx_te, use_pois = FALSE, tag = ""){
+  Xtr <- as.matrix(Xmat[idx_tr, , drop=FALSE])
+  Xte <- as.matrix(Xmat[idx_te, , drop=FALSE])
+  ytr <- y[idx_tr]; yte <- y[idx_te]
+
+  mod <- naive_bayes(x = Xtr, y = ytr, usepoisson = use_pois)
+  pred <- predict(mod, Xte)
+  cm   <- confusionMatrix(pred, yte)
+
+  list(
+    metrics = metrics_from_cm(cm) %>%
+      mutate(modelo = tag,
+             poisson = ifelse(use_pois, "Con Poisson", "Sin Poisson")),
+    cmtbl   = tibble(Real = yte, Predicho = pred) %>%
+      tabyl(Real, Predicho) %>%
+      adorn_totals(c("row","col"))
+  )
+}
+```
+
+```{r}
+# ===== 1) Cargar =====
+dtm_path    <- "../data/dtm_sparse.rds"  
+corpus_path <- "../data/corpus.rds"      
+stopifnot(file.exists(dtm_path), file.exists(corpus_path))
+
+dtm    <- readRDS(dtm_path)
+corpus <- readRDS(corpus_path)
+
+X_full <- as.data.frame(as.matrix(dtm), check.names = TRUE)
+doc_ids <- rownames(X_full)
+y <- factor(corpus$categoria[ match(doc_ids, corpus$doc_id) ])
+keep <- !is.na(y)
+X_full <- X_full[keep, , drop=FALSE]
+y      <- y[keep]
+doc_ids <- doc_ids[keep]
+
+# NRC (10 columnas) alineado
+nrc_all     <- get_nrc_sentiment(as.character(corpus$text))
+nrc_use     <- nrc_all[ match(doc_ids, corpus$doc_id), , drop=FALSE]
+
+# BOW reducido 
+topN <- 800   
+df_vec    <- colSums(X_full > 0) 
+top_terms <- names(sort(df_vec, decreasing = TRUE))[1:min(topN, ncol(X_full))]
+X_top     <- X_full[, top_terms, drop=FALSE]
+
+# Combos
+X_full_plus_nrc <- cbind(X_full, nrc_use)
+X_top_plus_nrc  <- cbind(X_top,  nrc_use)
+
+# ===== 2) Split 70/30  =====
+set.seed(1234)
+n <- nrow(X_full)
+idx_tr <- sample.int(n, floor(0.7*n))
+idx_te <- setdiff(seq_len(n), idx_tr)
+```
+
+```{r}
+# ===== 3) Correr los 10 modelos =====
+res <- list()
+
+# 1) BOW completo
+res[["BOW completo | Sin Poisson"]] <- fit_eval_nb(X_full, y, idx_tr, idx_te, FALSE, "BOW completo")
+res[["BOW completo | Con Poisson"]] <- fit_eval_nb(X_full, y, idx_tr, idx_te, TRUE,  "BOW completo")
+
+# 2) BOW reducido
+res[["BOW TopN | Sin Poisson"]] <- fit_eval_nb(X_top, y, idx_tr, idx_te, FALSE, paste0("BOW Top-", length(top_terms)))
+res[["BOW TopN | Con Poisson"]] <- fit_eval_nb(X_top, y, idx_tr, idx_te, TRUE,  paste0("BOW Top-", length(top_terms)))
+
+# 3) Solo NRC
+res[["NRC solo | Sin Poisson"]] <- fit_eval_nb(nrc_use, y, idx_tr, idx_te, FALSE, "NRC solo")
+res[["NRC solo | Con Poisson"]] <- fit_eval_nb(nrc_use, y, idx_tr, idx_te, TRUE,  "NRC solo")
+
+# 4) BOW completo + NRC
+res[["BOW completo + NRC | Sin Poisson"]] <- fit_eval_nb(X_full_plus_nrc, y, idx_tr, idx_te, FALSE, "BOW completo + NRC")
+res[["BOW completo + NRC | Con Poisson"]] <- fit_eval_nb(X_full_plus_nrc, y, idx_tr, idx_te, TRUE,  "BOW completo + NRC")
+
+# 5) BOW reducido + NRC
+res[["BOW TopN + NRC | Sin Poisson"]] <- fit_eval_nb(X_top_plus_nrc, y, idx_tr, idx_te, FALSE, paste0("BOW Top-", length(top_terms), " + NRC"))
+res[["BOW TopN + NRC | Con Poisson"]] <- fit_eval_nb(X_top_plus_nrc, y, idx_tr, idx_te, TRUE,  paste0("BOW Top-", length(top_terms), " + NRC"))
+
+# ===== 4) Tabla comparativa =====
+metrics_df <- bind_rows(lapply(res, `[[`, "metrics"))
+metrics_df <- metrics_df %>%
+  relocate(modelo, poisson) %>%
+  arrange(desc(accuracy))
+metrics_df
+```
+
+```{r}
+# ===== 5) Gráfica de métricas =====
+metrics_long <- metrics_df %>%
+  pivot_longer(cols = c(accuracy, precision, recall, f1_score),
+               names_to = "metric", values_to = "value")
+
+ggplot(metrics_long, aes(x = metric, y = value, fill = interaction(modelo, poisson, sep=" | "))) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Métricas por modelo (naivebayes)",
+       x = "Métrica", y = "Valor (proporción)", fill = "Modelo | Poisson") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 11))
+```
+
+La matriz de confusión para el mejor modelo se muestra a continuación:
+
+```{r}
+# ===== 6) Heatmap de la matriz de confusión del MEJOR modelo =====
+best_idx <- which.max(metrics_df$accuracy)
+best_key <- rownames(metrics_df)[best_idx]  
+best_tbl <- res[[best_idx]]$cmtbl
+
+
+
+cm_long <- best_tbl %>%
+  filter(Real != "Total") %>%
+  pivot_longer(-Real, names_to = "Predicho", values_to = "Casos") %>%
+  filter(Predicho != "Total")
+
+# ordenar ejes por frecuencia
+ord_real <- cm_long %>% group_by(Real) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Real)
+ord_pred <- cm_long %>% group_by(Predicho) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Predicho)
+cm_long$Real     <- factor(cm_long$Real, levels = ord_real)
+cm_long$Predicho <- factor(cm_long$Predicho, levels = ord_pred)
+
+ggplot(cm_long, aes(x = Predicho, y = Real, fill = Casos)) +
+  geom_tile() +
+  geom_text(aes(label = Casos), size = 4) +
+  scale_fill_gradient(low = "#f0f9e8", high = "#0868ac") +
+  labs(title = paste0("Matriz de confusión (mejor: ", best_key, ")"),
+       x = "Predicho", y = "Real", fill = "Casos") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Resultados con Cross-Validation de Laplace (e1071)
+
+Finalmente, se implementó validación cruzada (CV) para seleccionar el parámetro de Laplace smoothing.
+Curiosamente, en todos los casos la CV seleccionó laplace = 0, lo que significa que el suavizado no aportó mejoras en este conjunto de datos.
+
+El mejor resultado se dio con el BOW completo, logrando un accuracy de 0.7845, precision de 0.8413, recall de 0.7231 y F1-score de 0.7778, ligeramente superior a los demás modelos.
+
+```{r}
+# =========================
+# Insumos
+# =========================
+dtm    <- readRDS("../data/dtm_sparse.rds")   
+corpus <- readRDS("../data/corpus.rds")       
+
+# X completo
+X_full <- as.data.frame(as.matrix(dtm), check.names = TRUE)
+doc_ids <- rownames(X_full)
+y <- factor(corpus$categoria[ match(doc_ids, corpus$doc_id) ])
+keep <- !is.na(y)
+X_full <- X_full[keep, , drop = FALSE]
+y      <- y[keep]
+doc_ids <- doc_ids[keep]
+
+# NRC (10 cols) 
+nrc_all <- syuzhet::get_nrc_sentiment(as.character(corpus$text))
+nrc_use <- nrc_all[ match(doc_ids, corpus$doc_id), , drop = FALSE] %>%
+  dplyr::rename_with(~ paste0("nrc_", .x))
+
+# BOW Top-N por DF
+topN <- 800
+df_vec    <- colSums(X_full > 0)
+top_terms <- names(sort(df_vec, decreasing = TRUE))[1:min(topN, ncol(X_full))]
+X_top     <- X_full[, top_terms, drop = FALSE]
+
+# Combos
+X_fullN <- cbind(X_full, nrc_use)
+X_topN  <- cbind(X_top,  nrc_use)
+
+make_df <- function(X, y) { out <- as_tibble(X); out$..y.. <- y; out }
+df_full  <- make_df(X_full, y)
+df_top   <- make_df(X_top,  y)
+df_nrc   <- make_df(nrc_use, y)
+df_fullN <- make_df(X_fullN, y)
+df_topN  <- make_df(X_topN,  y)
+
+# Split 70/30
+set.seed(1234)
+n <- nrow(df_full)
+idx_tr <- sample.int(n, floor(0.7*n))
+idx_te <- setdiff(seq_len(n), idx_tr)
+
+split_like <- function(df) list(
+  train = df[idx_tr, , drop = FALSE],
+  test  = df[idx_te,  , drop = FALSE]
+)
+sp_full  <- split_like(df_full)
+sp_top   <- split_like(df_top)
+sp_nrc   <- split_like(df_nrc)
+sp_fullN <- split_like(df_fullN)
+sp_topN  <- split_like(df_topN)
+```
+
+```{r}
+#--------Función--------------
+metrics_from_cm <- function(cm){
+  acc <- as.numeric(cm$overall["Accuracy"])
+  byc <- cm$byClass
+  if (is.null(dim(byc))) {
+    precision <- as.numeric(byc["Pos Pred Value"])
+    recall    <- as.numeric(byc["Sensitivity"])
+    f1        <- 2*(precision*recall)/(precision+recall)
+  } else {
+    ppv   <- byc[, "Pos Pred Value"]
+    sens  <- byc[, "Sensitivity"]
+    f1vec <- 2*(ppv*sens)/(ppv+sens)
+    precision <- mean(ppv,  na.rm=TRUE)
+    recall    <- mean(sens, na.rm=TRUE)
+    f1        <- mean(f1vec, na.rm=TRUE)
+  }
+  tibble::tibble(
+    accuracy  = round(acc,4),
+    precision = round(precision,4),
+    recall    = round(recall,4),
+    f1_score  = round(f1,4)
+  )
+}
+
+# Conserva columnas con varianza > 0 en TODAS 
+keep_cols_by_class_global <- function(X_tr, y_tr){
+  levs <- levels(y_tr)
+  keep <- rep(TRUE, ncol(X_tr))
+  for (lv in levs){
+    idx <- which(y_tr == lv)
+    if (length(idx) > 1) {
+      vj <- apply(X_tr[idx, , drop=FALSE], 2, var)
+      keep <- keep & (vj > 0)
+    } else {
+      distinct2 <- apply(X_tr, 2, function(z) length(unique(z)) > 1)
+      keep <- keep & distinct2
+    }
+  }
+  colnames(X_tr)[keep]
+}
+# -----------------------------------------------------------------------
+
+
+# ===================== Función principal (e1071 + CV Laplace) =====================
+run_cv_e1071 <- function(sp, label_dataset = "",
+                         laplace_grid = c(0, 0.5, 1, 2, 3), v = 5) {
+  stopifnot(is.list(sp), all(c("train","test") %in% names(sp)))
+  tr <- sp$train; te <- sp$test
+  stopifnot(is.data.frame(tr), is.data.frame(te))
+  stopifnot(ncol(tr) >= 2, ncol(te) >= 2)
+
+  y_tr <- factor(tr[[ncol(tr)]])
+  y_te <- factor(te[[ncol(te)]], levels = levels(y_tr))
+
+  X_tr_raw <- tr[, -ncol(tr), drop = FALSE]
+  X_te_raw <- te[, -ncol(te), drop = FALSE]
+
+  # Forzar numérico en X (por si vienen como integer/character)
+  X_tr_raw[] <- lapply(X_tr_raw, function(col) as.numeric(col))
+  X_te_raw[] <- lapply(X_te_raw, function(col) as.numeric(col))
+
+  # --- Filtro GLOBAL sobre TRAIN ---
+  keep_cols <- keep_cols_by_class_global(X_tr_raw, y_tr)
+  if (length(keep_cols) == 0) stop("Filtro dejó 0 columnas. Revisa tu DTM/vars.")
+  X_tr <- X_tr_raw[, keep_cols, drop = FALSE]
+  X_te <- X_te_raw[, keep_cols, drop = FALSE]
+
+  # --- Folds estratificados en TRAIN ---
+  set.seed(2025)
+  folds <- caret::createFolds(y_tr, k = v, returnTrain = FALSE)
+
+  # --- CV en grid de Laplace ---
+  cv_tab <- lapply(laplace_grid, function(L){
+    accs <- numeric(length(folds))
+    for (i in seq_along(folds)){
+      va_idx <- folds[[i]]
+      tr_idx <- setdiff(seq_len(nrow(X_tr)), va_idx)
+
+      mod <- e1071::naiveBayes(x = X_tr[tr_idx, , drop=FALSE],
+                               y = y_tr[tr_idx], laplace = L)
+      pred_va <- predict(mod, X_tr[va_idx, , drop=FALSE])
+      accs[i] <- mean(pred_va == y_tr[va_idx])
+    }
+    tibble::tibble(laplace = L, cv_accuracy = mean(accs))
+  }) |> dplyr::bind_rows() |> dplyr::arrange(dplyr::desc(cv_accuracy))
+
+  best_laplace <- cv_tab$laplace[1]
+
+  # --- Modelo final en TODO el TRAIN con best_laplace + evaluación en TEST ---
+  final_mod <- e1071::naiveBayes(x = X_tr, y = y_tr, laplace = best_laplace)
+  pred_te   <- predict(final_mod, X_te)
+  cm        <- caret::confusionMatrix(pred_te, y_te)
+
+  list(
+    label     = label_dataset,
+    laplace   = best_laplace,
+    cv_table  = cv_tab,
+    metrics   = metrics_from_cm(cm) |>
+                  dplyr::mutate(dataset = label_dataset,
+                                laplace  = best_laplace, .before = 1),
+    cm        = cm,
+    kept_cols = keep_cols
+  )
+}
+# ======================================================================
+```
+
+```{r}
+res_full  <- run_cv_e1071(sp_full,  "BOW completo")
+res_top   <- run_cv_e1071(sp_top,   paste0("BOW Top-", ncol(sp_top$train)-1))
+res_nrc   <- run_cv_e1071(sp_nrc,   "NRC solo")
+res_fullN <- run_cv_e1071(sp_fullN, "BOW completo + NRC")
+res_topN  <- run_cv_e1071(sp_topN,  paste0("BOW Top-", ncol(sp_top$train)-1, " + NRC"))
+
+tabla <- bind_rows(
+  res_full$metrics,
+  res_top$metrics,
+  res_nrc$metrics,
+  res_fullN$metrics,
+  res_topN$metrics
+)
+tabla
+```
+
+```{r}
+# =========================
+# Gráfico de métricas
+# =========================
+metrics_long <- tabla %>%
+  pivot_longer(cols = c(accuracy, precision, recall, f1_score),
+               names_to = "metric", values_to = "value")
+
+metrics_long
+
+ggplot(metrics_long, aes(x = metric, y = value, fill = dataset)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Métricas en test (NB e1071 con CV de Laplace)",
+       subtitle = "Filtro global de varianza por clase + columnas constantes fijadas en train",
+       x = "Métrica", y = "Valor", fill = "Dataset") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 11))
+```
+
+A continuación se muestra su matriz de confusión:
+
+```{r}
+# =========================
+# Heatmap del mejor
+# =========================
+best_name <- tabla$dataset[ which.max(tabla$accuracy) ]
+
+best_cm <- switch(best_name,
+  "BOW completo"        = res_full$cm,
+  "NRC solo"            = res_nrc$cm,
+  "BOW completo + NRC"  = res_fullN$cm,
+  "BOW Top-800"         = res_top$cm,   # aquí fijo el nombre
+  "BOW Top-800 + NRC"   = res_topN$cm
+)
+
+cm_list <- list(
+  res_full$cm,
+  res_nrc$cm,
+  res_fullN$cm,
+  res_top$cm,
+  res_topN$cm
+)
+
+names(cm_list) <- c(
+  "BOW completo",
+  "NRC solo",
+  "BOW completo + NRC",
+  paste0("BOW Top-", ncol(sp_top$train)-1),
+  paste0("BOW Top-", ncol(sp_topN$train)-1, " + NRC")
+)
+
+best_cm <- cm_list[[best_name]]
+
+cm_tbl <- as.data.frame(best_cm$table) %>%
+  as_tibble() %>%
+  rename(Real = Reference, Predicho = Prediction, Casos = Freq)
+
+ord_real <- cm_tbl %>% group_by(Real) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Real)
+ord_pred <- cm_tbl %>% group_by(Predicho) %>% summarise(n = sum(Casos)) %>% arrange(desc(n)) %>% pull(Predicho)
+cm_tbl$Real     <- factor(cm_tbl$Real, levels = ord_real)
+cm_tbl$Predicho <- factor(cm_tbl$Predicho, levels = ord_pred)
+
+ggplot(cm_tbl, aes(x = Predicho, y = Real, fill = Casos)) +
+  geom_tile() +
+  geom_text(aes(label = Casos), size = 4) +
+  scale_fill_gradient(low = "#f0f9e8", high = "#0868ac") +
+  labs(title = paste0("Matriz de confusión (mejor dataset: ", best_name, ")"),
+       x = "Predicho", y = "Real", fill = "Casos") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Conclusiones
+
+	•	En la librería e1071, el mejor modelo fue BOW Top-800, destacando por su equilibrio entre precisión y recall.
+	•	Con la librería naivebayes, no se observaron diferencias entre los modelos con y sin Poisson; el mejor desempeño también se obtuvo con BOW Top-800.
+	•	La validación cruzada de Laplace reveló que el mejor valor era laplace = 0, con un desempeño superior en el BOW completo, alcanzando el mayor accuracy y F1-score de todos los experimentos.
+
+En resumen, los resultados muestran que la reducción de vocabulario (Top-800) mejora el balance precisión-sensibilidad, pero la combinación con CV y Laplace favorece al modelo con BOW completo.
+Para futuras implementaciones, sería recomendable:
+	1.	Probar representaciones alternativas como TF-IDF para resaltar términos distintivos.
+	2.	Incorporar más rasgos semánticos (emociones NRC extendidas, longitud de texto, etc.).
+	3.	Evaluar modelos más flexibles como regresión logística regularizada o SVM para comparar con Naive Bayes.
+
+
+# Referencias
+
+- Manning, C. D., Raghavan, P., & Schütze, H. (2008). Introduction to Information Retrieval. Cambridge University Press.
+
+- Mitchell, T. M. (1997). Machine Learning. McGraw-Hill.
+
+- Murphy, K. P. (2012). Machine Learning: A Probabilistic Perspective. MIT Press.
+
+- Çetinkaya-Rundel, M. (2024, octubre 1). Web scraping [Presentación]. Duke University, STA 199 – Fall 2024.
+
+
+
+
+
+
+
